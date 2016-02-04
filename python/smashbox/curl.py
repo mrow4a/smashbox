@@ -1,13 +1,11 @@
 from smashbox.utilities import *
 
-import smashbox.utilities.structures
-
 class Response:
     def __init__(self):
         self.rc = None
         self.headers = []
         self.body = None
-
+        
 import pycurl, cStringIO
 
 class Client:
@@ -150,7 +148,7 @@ class Client:
         
         response_obj.rc=c.getinfo(c.HTTP_CODE)
 
-        response_obj.headers = smashbox.utilities.structures.CaseInsensitiveDict()
+        response_obj.headers = {}
         for h in ret_headers:
             h = h.strip()
             if not h:

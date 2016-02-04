@@ -47,7 +47,7 @@ oc_webdav_endpoint = os.path.join(oc_root,'remote.php/webdav') # standard ownclo
 oc_server_folder = ''
 
 # should we use protocols with SSL (https, ownclouds)
-oc_ssl_enabled = True
+oc_ssl_enabled = False
 
 # how to invoke shell commands on the server
 # for localhost there is no problem - leave it blank
@@ -124,13 +124,6 @@ del os
 # 
 pycurl_verbose = None
 
+#
 # scp port to be used in scp commands, used primarily when copying over the server log file
-scp_port = 22
-
-# user that can r+w the owncloud.log file (needs to be configured for passwordless login)
-oc_server_log_user = "www-data"
-
-#
-# Reset the server log file and verify that no exceptions and other known errors have been logged
-#
-oc_check_server_log = False
+scp_port=22

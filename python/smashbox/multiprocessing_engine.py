@@ -81,6 +81,7 @@ class _smash_:
            import time
            tmp_name = os.path.join(self._dir,'tmp.%s.%s._attr_%s'%(os.getpid(),time.time(),key))
            dest_name = os.path.join(self._dir,'_attr_'+key)
+                           
            pickle.dump(val,file(tmp_name,'w'))
 
            import shutil
@@ -88,7 +89,6 @@ class _smash_:
 
         def keys(self):
            import glob
-           self._makedir()
            attrs = [os.path.basename(a)[len('_attr_'):] for a in glob.glob(os.path.join(self._dir,'_attr_*'))]
            return attrs
 
@@ -104,8 +104,7 @@ class _smash_:
     all_procs = []
 
     @staticmethod
-    def supervisor(steps):
-
+    def supervisor(steps, test_manager):
         import time
         #print "SU",steps
         #print 'SU',[s for s in steps]
@@ -123,10 +122,8 @@ class _smash_:
                     break
 
             #print "supervisor step completed:",supervisor_step.value,steps
-
+            test_manager.finalize_step( _smash_.supervisor_step.value)
             _smash_.supervisor_step.value += 1
-
-        
 
         if _smash_.DEBUG:
             log('stop',_smash_.supervisor_step.value,_smash_.steps)
@@ -152,7 +149,7 @@ class _smash_:
             logger.info( 'entering new step \n'+sep+'\n'+'(%d) %s:  %s\n'%(i,_smash_.process_name,message.upper())+sep)
 
     @staticmethod
-    def worker_wrap(wi,f,fname):
+    def worker_wrap(wi,f,fname,test_manager):
         if fname is None:
             fname = f.__name__
         _smash_.process_name=fname
@@ -170,23 +167,18 @@ class _smash_:
         finally:
             # worker finish
             step(_smash_.N_STEPS-1,None) # don't print any message
-
+            
             import smashbox.utilities
+            test_manager.finalize_worker((smashbox.utilities.sync_exec_time_array), (smashbox.utilities.reported_errors),fname)
             if smashbox.utilities.reported_errors:
                logger.error('%s error(s) reported',len(smashbox.utilities.reported_errors))
                import sys
                sys.exit(2)
-                  
-
     @staticmethod
     def run():
         """ Lunch worker processes and the supervisor loop. Block until all is finished.
         """
         from multiprocessing import Process, Manager
-
-        import smashbox.utilities
-        smashbox.utilities.setup_test()        
-
         manager = Manager()
 
         _smash_.shared_object = _smash_.SmashSharedObject(os.path.join(config.rundir,'_shared_objects'))
@@ -201,26 +193,30 @@ class _smash_:
 
         _smash_.steps = manager.list([0 for x in range(len(_smash_.workers))])
 
+        import smashbox.test_manager
+        test_manager = smashbox.test_manager.Test_Manager(os.path.basename(_smash_.args.test_target),config)
+        test_manager.setup_test(_smash_.workers,manager)
+
         # first worker => process number == 0
         for i,f_n in enumerate(_smash_.workers):
             f = f_n[0]
             fname = f_n[1]
-            p = Process(target=_smash_.worker_wrap,args=(i,f,fname))
+            p = Process(target=_smash_.worker_wrap,args=(i,f,fname,test_manager))
             p.start()
             _smash_.all_procs.append(p)
 
-        _smash_.supervisor(_smash_.steps)
-
+        _smash_.supervisor(_smash_.steps, test_manager)
+        
         for p in _smash_.all_procs:
             p.join()
-
-        smashbox.utilities.finalize_test()
-
+        
+        test_manager.finalize_test()
+        
         for p in _smash_.all_procs:
            if p.exitcode != 0:
               import sys
               sys.exit(p.exitcode)
-
+              
 def add_worker(f,name=None):
     """ Decorator for worker functions in the user-defined test
     scripts: workers execute in parallel and may use 'step(N)' syntax
@@ -238,7 +234,6 @@ if __name__ == "__main__":
     _smash_.parser = smashbox.compatibility.argparse.ArgumentParser()
     _smash_.parser.add_argument('test_target')
     _smash_.parser.add_argument('config_blob')
-
     _smash_.args = _smash_.parser.parse_args()
 
     # this is OK: config and logger will be visible symbols in the user's test code
@@ -304,7 +299,7 @@ if __name__ == "__main__":
     
     # load test case file directly into the global namespace of this script
     execfile(_smash_.args.test_target)
-
+    
     # start the framework and dispatch workers
     _smash_.run()
 

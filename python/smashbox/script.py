@@ -99,22 +99,15 @@ def configure(cmdline_opts,config_files=None):
 
          setattr(config,key,val)
 
-   config_log(level=logging.DEBUG)
+   config_log(level=logging.DEBUG) 
    
    return config
 
-def config_log(level,hide_password=False):
-   """ Dump the entire configuration to the logging system at the given level.
-   If hide_password=True then do not show the real value of the options which contain "password" in their names.
-   """
+def config_log(level):
    logger = getLogger()
    for d in dir(config):
       if not d.startswith("_") and d != "get":
-          value = repr(getattr(config,d))
-          if hide_password and 'password' in d:
-             value = "***"
-             
-          logger.log(level,"CONFIG: %s = %s",d,value)
+          logger.log(level,"CONFIG: %s = %s",d,repr(getattr(config,d)))
 
 
 import logging

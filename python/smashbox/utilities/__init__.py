@@ -7,6 +7,23 @@ import time
 
 # Utilities to be used in the test-cases.
 
+def oc_engine_dependence(func):
+    global ocsync_cnt,sync_exec_time_array,config
+    def checker(*args, **kwargs): 
+        import importlib
+        #check if there was specified any additional engine using e.g. --option engine=dropbox
+        try:
+            engine = getattr(config, "engine")
+            imported_mod = importlib.import_module('smashbox.test_manager.non_native_engine')
+            imported_sync_class = getattr(imported_mod, config.engine)
+            imported_class_function = getattr(imported_sync_class, func.__name__)
+            from smashbox.utilities import reflection
+            worker_name = reflection.getProcessName()
+            return imported_class_function(args,config,worker_name) #print "executing sync engine custom function %s"%func.__name__
+        except Exception, e:
+            return func(*args, **kwargs) #
+    return checker 
+
 def OWNCLOUD_CHUNK_SIZE(factor=1):
     """Calculate file size as a fraction of owncloud client's default chunk size.
     """
@@ -15,37 +32,7 @@ def OWNCLOUD_CHUNK_SIZE(factor=1):
 
 ######## TEST SETUP AND PREPARATION
 
-def setup_test():
-    """ Setup hooks run before any worker kicks-in. 
-    This is run under the name of the "supervisor" worker.
-
-    The behaviour of these hooks is entirely controlled by config
-    options. It should be possible to disable optional hooks by
-    configuration.
-
-    If exception is raised then the testcase execution is aborted and smashbox terminates with non-zero exit code,
-
-    """
-    reset_owncloud_account(num_test_users=config.oc_number_test_users)
-    reset_rundir()
-    reset_server_log_file()
-    
-
-def finalize_test():
-    """ Finalize hooks run after last worker terminated.
-    This is run under the name of the "supervisor" worker.
-
-    The behaviour of these hooks is entirely controlled by config
-    options. It should be possible to disable optional hooks by
-    configuration.
-    
-    If exception is raised then smashbox terminates with non-zero exit code,
-    """
-    d = make_workdir()
-    scrape_log_file(d)
-
-######### HELPERS
-
+@oc_engine_dependence
 def reset_owncloud_account(reset_procedure=None, num_test_users=None):
     """ 
     Prepare the test account on the owncloud server (remote state). Run this once at the beginning of the test.
@@ -58,6 +45,7 @@ def reset_owncloud_account(reset_procedure=None, num_test_users=None):
     If reset_procedure is set to 'keep' than the account is not deleted, so the state from the previous run is kept.
 
     """
+    
     if reset_procedure is None:
         reset_procedure = config.oc_account_reset_procedure
 
@@ -80,13 +68,13 @@ def reset_owncloud_account(reset_procedure=None, num_test_users=None):
                 login_owncloud_account(username, config.oc_account_password)
 
         return
-
-    if reset_procedure == 'webdav_delete':
+    
+    elif reset_procedure == 'webdav_delete':
         webdav_delete('/') # delete the complete webdav endpoint associated with the remote account
         webdav_delete('/') # FIXME: workaround current bug in EOS (https://savannah.cern.ch/bugs/index.php?104661) 
-
+        webdav_mkcol('/')
+        
     # if create if does not exist (for keep or webdav_delete options)
-    webdav_mkcol('/')
 
 
 def reset_rundir(reset_procedure=None):
@@ -109,9 +97,8 @@ def reset_rundir(reset_procedure=None):
     if reset_procedure == 'delete':
         assert(os.path.realpath(config.rundir).startswith(os.path.realpath(config.smashdir)))
         remove_tree(config.rundir)
-        mkdir(config.rundir)
-
-
+        
+@oc_engine_dependence
 def make_workdir(name=None):
     """ Create a worker directory in the current run directory for the test (by default the name is derived from 
     the worker's name). 
@@ -275,39 +262,58 @@ def oc_webdav_url(protocol='http',remote_folder="",user_num=None,webdav_endpoint
         password = "***"
     else:
         password = config.oc_account_password
-
+        
+    import urllib    
+    username = urllib.quote(username.encode("utf-8"))
+    password = urllib.quote(password.encode("utf-8"))   
+    oc_server = urllib.quote((config.oc_server).encode("utf-8"))  
+    
     return protocol + '://' + username + ':' + password + '@' + config.oc_server + '/' + remote_path
 
 
 # this is a local variable for each worker that keeps track of the repeat count for the current step
 ocsync_cnt = {}
 
+sync_exec_time_array = []
 
-def run_ocsync(local_folder, remote_folder="", n=None, user_num=None):
+@oc_engine_dependence  
+def sync_engine(cmd,option):
+    t0 = datetime.datetime.now()
+    runcmd(cmd, ignore_exitcode=True)  # exitcode of ocsync is not reliable
+    t1 = datetime.datetime.now()
+    logger.info('sync cmd is: %s',cmd) 
+    
+    if option:
+        for opt in option:
+            if opt=='exclude_time':
+                return None
+    return [t0,t1]  
+
+def run_ocsync(local_folder, remote_folder="", n=None, user_num=None, option = None):
     """ Run the ocsync for local_folder against remote_folder (or the main folder on the owncloud account if remote_folder is None).
     Repeat the sync n times. If n given then n -> config.oc_sync_repeat (default 1).
+    Option parameters is used in case of non-native engine and could specify specific behaviour of sync in the specific step. 
     """
-    global ocsync_cnt
+    
+    global ocsync_cnt,sync_exec_time_array
     from smashbox.utilities import reflection
 
     if n is None:
         n = config.oc_sync_repeat
 
     current_step = reflection.getCurrentStep()
-
+    
     ocsync_cnt.setdefault(current_step,0)
 
     local_folder += '/' # FIXME: HACK - is a trailing slash really needed by 1.6 owncloudcmd client?
 
     for i in range(n):
-        t0 = datetime.datetime.now()
         cmd = config.oc_sync_cmd+' '+local_folder+' '+oc_webdav_url('owncloud',remote_folder,user_num) + " >> "+config.rundir+"/%s-ocsync.step%02d.cnt%03d.log 2>&1"%(reflection.getProcessName(),current_step,ocsync_cnt[current_step])
-        runcmd(cmd, ignore_exitcode=True)  # exitcode of ocsync is not reliable
-        logger.info('sync cmd is: %s',cmd)
-        logger.info('sync finished: %s',datetime.datetime.now()-t0)
-        ocsync_cnt[current_step]+=1
-
-
+        sync_exec_time = sync_engine(cmd,option)
+        sync_exec_time_array.append(sync_exec_time)  
+        logger.info('sync finished: %s s'%sync_exec_time)
+        ocsync_cnt[current_step]+=1  
+    
 def webdav_propfind_ls(path, user_num=None):
     runcmd('curl -s -k %s -XPROPFIND %s | xmllint --format -'%(config.get('curl_opts',''),oc_webdav_url(remote_folder=path, user_num=user_num)))
 
@@ -332,6 +338,8 @@ def webdav_mkcol(path, silent=False, user_num=None):
 
 # #### SHELL COMMANDS AND TIME FUNCTIONS
 
+reported_errors = []
+
 def runcmd(cmd,ignore_exitcode=False,echo=True,allow_stderr=True,shell=True,log_warning=True):
     logger.info('running %s', repr(cmd))
 
@@ -350,6 +358,7 @@ def runcmd(cmd,ignore_exitcode=False,echo=True,allow_stderr=True,shell=True,log_
     if process.returncode != 0:
         msg = "Non-zero exit code %d from command %s" % (ignore_exitcode,repr(cmd))
         if log_warning:
+            reported_errors.append(msg)
             logger.warning(msg)
         if not ignore_exitcode:
             raise subprocess.CalledProcessError(process.returncode,cmd)
@@ -390,15 +399,10 @@ def mv(a,b):
 
 
 def list_files(path,recursive=False):
-    if platform.system() == 'Darwin':
-        opts = ""
-    else:
-        opts = "--full-time"
-
     if recursive:
-        runcmd('ls -lR %s %s'%(opts,path))
+        runcmd('ls -lR --full-time %s'%path)
     else:
-        runcmd('ls -lh %s %s'%(opts,path))
+        runcmd('ls -lh --full-time %s'%path)
 
 
 # ## DATA FILES AND VERSIONS
@@ -412,7 +416,75 @@ def createfile(fn,c,count,bs):
         of.write(buf)
     of.close()
 
+def create_dummy_file(wdir,name,size,bs=None):
+    """ by default - creates file with fully random content, specified name and in specific directory. 
+    By specifing bs blocksize, random bytes will be structured in blocks and repeated ntimes """
+    import random
+    nbytes = int(size)
+    
+    if bs is None:
+        bs = nbytes
 
+    nblocks = nbytes/bs
+    nr = nbytes%bs
+
+    assert nblocks*bs+nr==nbytes,'Chunking error!'
+
+    time.sleep(0.1)
+
+    # Prepare the building blocks
+    fn = os.path.join(wdir,name)
+
+    f = file(fn,'w')
+
+    block_data = str(os.urandom(bs)) # Repeated nblocks times
+    # write data blocks
+    for i in range(nblocks):
+        f.write(block_data)
+
+    block_data_r = str(os.urandom(nr))       # Only once
+    f.write(block_data_r)
+    f.close()
+
+    return fn
+
+def modify_dummy_file(fn,size,bs=None,checksum=False):
+    import random
+    import hashlib
+    
+    nbytes = int(size)
+    
+    if bs is None:
+        bs = nbytes
+        
+    nblocks = nbytes/bs
+    nr = nbytes%bs
+
+    assert nblocks*bs+nr==nbytes,'Chunking error!'
+
+    time.sleep(0.1)
+
+    # Prepare the building blocks
+    f = file(fn,'a')
+    f.seek(0,2)
+    # write data blocks
+    for i in range(nblocks):
+        block_data = str(os.urandom(bs)) # Repeated nblocks times
+        f.write(block_data)
+
+    block_data_r = str(os.urandom(nr))       # Only once
+    f.write(block_data_r)
+    f.close()
+    if checksum==True:
+        f = file(fn,'r')
+        data = f.read()
+        f.close()
+        md5 = hashlib.md5()
+        md5.update(data)
+        filemask = "{md5}"        
+        new_fn = os.path.join(os.path.dirname(fn),filemask.replace('{md5}',md5.hexdigest()))
+        os.rename(fn,new_fn)
+    
 def modify_file(fn,c,count,bs):
     logger.info('modify_file %s character=%s count=%d bs=%d',fn,repr(c),count,bs)
     buf = c*bs
@@ -511,8 +583,6 @@ def implies(p,q):
 
 # ###### ERROR REPORTING ############
 
-reported_errors = []
-
 def error_check(expr,message=""):
     """ Assert expr is True. If not, then mark the test as failed but carry on the execution.
     """
@@ -533,27 +603,9 @@ def fatal_check(expr,message=""):
         message=" ".join([message, "%s failed in %s() [\"%s\" at line %s]" %(''.join(f[4]).strip(),f[3],f[1],f[2])])
         logger.fatal(message)
         reported_errors.append(message)
-        raise AssertionError(message)
 
 
 # ###### Server Log File Scraping ############
-
-def reset_server_log_file():
-    """ Deletes the existing server log file so that there is a clean
-        log file for the test run
-    """
-
-    try:
-        if not config.oc_check_server_log:
-            return
-    except AttributeError: # allow this option not to be defined at all
-        return
-
-    logger.info('Removing existing server log file')
-    cmd = '%s rm -rf %s/owncloud.log' % (config.oc_server_shell_cmd, config.oc_server_datadirectory)
-    runcmd(cmd)
-
-
 
 def scrape_log_file(d):
     """ Copies over the server log file and searches it for specific strings
@@ -561,25 +613,13 @@ def scrape_log_file(d):
     :param d: The directory where the server log file is to be copied to
 
     """
-
-    try:
-        if not config.oc_check_server_log:
-            return
-    except AttributeError: # allow this option not to be defined at all
-        return
-
-    if config.oc_server == '127.0.0.1' or config.oc_server == 'localhost':
-        cmd = 'cp %s/owncloud.log %s/.' % (config.oc_server_datadirectory, d)
-    else:
-        try:
-            log_user = config.oc_server_log_user
-        except AttributeError:  # allow this option not to be defined at all
-            log_user = 'root'
-        cmd = 'scp -P %d %s@%s:%s/owncloud.log %s/.' % (config.scp_port, log_user, config.oc_server, config.oc_server_datadirectory, d)
+    cmd = 'scp -P %d root@%s:%s/owncloud.log %s/.' % (config.scp_port, config.oc_server, config.oc_server_datadirectory, d)
     rtn_code,stdout,stderr = runcmd(cmd)
-    error_check(rtn_code > 0, 'Could not copy the log file from the server, command returned %s' % rtn_code)
+
+    logger.info('copy command returned %s', rtn_code)
 
     # search logfile for string (1 == not found; 0 == found):
+
     cmd = "grep -i \"integrity constraint violation\" %s/owncloud.log" % d
     rtn_code,stdout,stderr = runcmd(cmd, ignore_exitcode=True, log_warning=False)
     error_check(rtn_code > 0, "\"Integrity Constraint Violation\" message found in server log file")
@@ -759,5 +799,46 @@ def expect_exists(fn):
 def expect_does_not_exist(fn):
     """ Checks that a file does not exist, as expected
     """
-    error_check(not os.path.exists(fn), "File %s exists but should not" % fn)
-
+    error_check(not os.path.exists(fn), "File %s exists but should not" % fn)     
+       
+@oc_engine_dependence         
+def curl_check_url(config):
+    from smashbox.utilities import  oc_webdav_url
+    import smashbox.curl, sys
+    
+    url = oc_webdav_url(remote_folder='', user_num=None)
+    query="""<?xml version="1.0" ?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+  </d:prop>
+</d:propfind>
+"""
+    client = smashbox.curl.Client()
+    exit_flag = False
+    try:
+        r = client.PROPFIND(url,query,depth=0,parse_check=False)
+        if r.body_stream.getvalue() == "":
+            print ("\n%s\n\nSMASHBOX_CHECK ERROR: %s, Empty response\nCHECK CONFIGURATION - oc_root, oc_ssl_enabled, oc_server, oc_server_shell_cmd etc.\nCHECK HEADERS e.g. for 302 - Location=%s\n"%(r.headers,r.rc,str(r.headers['Location'])))
+            exit_flag = True
+        else:
+            import xml.etree.ElementTree as ET
+            try:
+                root = ET.fromstring(r.body_stream.getvalue())
+                if root.tag.find("error") != -1:
+                    raise Exception
+                else:
+                    print "SMASHBOX_CHECK OK"
+            except:
+                print "SMASHBOX_CHECK ERROR: %s"%r.body_stream.getvalue()  
+                if str(r.body_stream.getvalue()).find("HTML") != -1:
+                    exit_flag=False
+                else:
+                    exit_flag = True
+    except Exception, e:
+        exit_flag = True
+        print e
+    finally:
+        if(exit_flag):
+            sys.exit() 
+    
+    
